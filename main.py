@@ -6,15 +6,22 @@ from time import sleep
 import logging
 import requests
 import yaml
+import json
 import yt_dlp
-from pyarr import SonarrAPI, RadarrAPI
+import colorlog
+from dotenv import load_dotenv
 
-
+from trailer_downloader import TrailerDownloader
 def load_config():
-    with open('config/config.yaml', 'r') as f:
+    if not os.path.isdir('config'):
+        return False
+    
+    if not os.path.isfile('config/config.yml'):
+        return False
+    
+    with open('config/config.yml', 'r') as f:
         global config
         config = yaml.load(f, Loader=yaml.Loader)
-
 
 def dl_progress(d):
     if d['status'] == 'finished':
@@ -218,33 +225,40 @@ def post_process(filename, cropvalue, item_path, bitrate):
     except Exception as e:
         logging.error(f"ERROR: {e}")
 
-logging.basicConfig(format='%(asctime)s %(message)s', encoding='utf-8', level=logging.INFO)
-try:
-    os.mkdir("cache")
-    logging.debug("Created cache directory.")
-except:
-    logging.debug("Cache directory found.")
-while True:
-    load_config()
-    thread_count = config['thread_count'] if 'thread_count' in config else 0
-    if all(x in config for x in ['radarr_host', 'radarr_api']):
-        radarr = RadarrAPI(config['radarr_host'], config['radarr_api'])
-        movie_finder()
-    else:
-        logging.info("No Radarr API key/host were found, skipping...")
-    if all(x in config for x in ['sonarr_host', 'sonarr_api']):
-        sonarr = SonarrAPI(config['sonarr_host'], config['sonarr_api'])
-        show_finder()
-    else:
-        logging.info("No Sonarr API key/host were found, skipping...")
-    for f in os.listdir("cache/"): os.remove(f"cache/{f}")
-    if 'sleep_time' in config:
-        if isinstance(config['sleep_time'], int):
-            logging.info(
-                f"Operation complete. Clearing temporary files and sleeping for {config['sleep_time']} hour(s).")
+def __main__():
+    trailer_downloader = TrailerDownloader()
+    trailer_downloader.run()
+    
+    trailer_downloader.shutdown()
+    return
+    
+    while True:
+        thread_count = config['thread_count'] if 'thread_count' in config else 0
+        if all(x in config for x in ['radarr_host', 'radarr_api']):
+            radarr = RadarrAPI(config['radarr_host'], config['radarr_api'])
+            movie_finder()
         else:
-            logging.info(
-                f"Operation complete. Clearing temporary files and sleeping for {config['sleep_time'] * 60} minute(s).")
-        sleep(float(config['sleep_time']) * 3600)
-    else:
-        exit(logging.info("Operation complete. No sleep time was set, stopping."))
+            logging.info("No Radarr API key/host were found, skipping...")
+        if all(x in config for x in ['sonarr_host', 'sonarr_api']):
+            sonarr = SonarrAPI(config['sonarr_host'], config['sonarr_api'])
+            show_finder()
+        else:
+            logging.info("No Sonarr API key/host were found, skipping...")
+        for f in os.listdir("cache/"): os.remove(f"cache/{f}")
+        if 'sleep_time' in config:
+            if isinstance(config['sleep_time'], int):
+                logging.info(
+                    f"Operation complete. Clearing temporary files and sleeping for {config['sleep_time']} hour(s).")
+            else:
+                logging.info(
+                    f"Operation complete. Clearing temporary files and sleeping for {config['sleep_time'] * 60} minute(s).")
+            sleep(float(config['sleep_time']) * 3600)
+        else:
+            exit(logging.info("Operation complete. No sleep time was set, stopping."))
+
+colorlog.basicConfig(level=logging.DEBUG, style="{", format="{log_color}[{levelname:^5s}] {asctime}: {message}", datefmt="%y-%m-%d %H:%M:%S", encoding="utf-8")
+if __name__ == "__main__":
+    logging.info("Starting...")
+    if load_dotenv():
+        logging.info("Loaded environment variables.")
+    __main__()

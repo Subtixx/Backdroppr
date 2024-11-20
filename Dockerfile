@@ -1,9 +1,17 @@
-FROM python:3.10.8
-RUN apt update && apt install -y ffmpeg
-WORKDIR .
-COPY main.py /main.py
-COPY requirements.txt requirements.txt
+FROM python:3.10.8-alpine
 
-RUN pip install -r requirements.txt
+LABEL org.opencontainers.image.authors="Dominic Hock <d.hock@it-hock.de>, ShiniGandhi <@ShiniGandhi>"
+LABEL org.opencontainers.image.description="An automated system to download trailers."
+LABEL org.opencontainers.image.url="https://github.com/subtixx/Backdroppr"
+LABEL org.opencontainers.image.source="https://github.com/subtixx/Backdroppr"
 
-CMD python3 /main.py
+RUN apk add --no-cache ffmpeg=5.1.4-r0
+
+WORKDIR /app
+
+COPY main.py /app/main.py
+COPY requirements.txt /app/requirements.txt
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+CMD ["python3", "/app/main.py"]
