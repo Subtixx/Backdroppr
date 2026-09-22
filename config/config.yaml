@@ -7,6 +7,7 @@ tmdb_api: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 output_dirs: "trailers"
 ### Optional ###
 filetype: "webm"
+validate_trailers: True
 sleep_time: 3
 length_range: "30,300"
 skip_intros: True

@@ -12,7 +12,6 @@ Backdropper is a tool written in Python that is used to import movies and shows 
 * Option to run the script once, if no sleep time was set.
 
 ## Known Bugs
-* If no trailer was found on TheMovieDB, the script will manually search for one, but will keep searching again even if it already found and downloaded one. It won't redownload it though.
 * Issue when a video with 5.1 audio is found.
 * Skips the rest of the trailers in TheMovieDB if a link is dead.
 
@@ -60,6 +59,7 @@ sleep_time: 3
 length_range: "30,300"
 ### Optional ###
 filetype: "webm"
+validate_trailers: true
 skip_intros: True
 thread_count: 8
 subs: True
@@ -83,6 +83,12 @@ tvpath: "/vault/Media/TV Shows"
 | subs | Whether or not subtitles will be downloaded </br>`vtt` if `webm` and `ass` if `mp4`. </br>Defaults to `False` if not set.                                                                                                                  | `True` or `Falase` | No |
 | moviepath | Override the path set inside Radarr if not the same as the script's </br>Useful if Radarr is running inside a container or on a different machine.                                                                                         | `"/vault/Media/Movies"` | No |
 | tvpath | Override the path set inside Sonarr if not the same as the script's </br>Useful if Sonarr is running inside a container or on a different machine.                                                                                         | `"/vault/Media/TV Shows"` | No |
+
+`validate_trailers` defaults to `True`. It checks that each completed download and converted output is nonempty and contains video and audio, using ffprobe. Set it to `false` to skip these checks. It does not scan existing library files or perform a full decode.
+
+Downloads get two attempts per candidate, with up to three yt-dlp network/fragment retries, before trying another of the first five YouTube search results. Partial downloads remain in the cache for resuming; only completed downloads reach conversion. Old cache files named by movie title are not reused by the new video-ID filenames. Failed or unused candidates can remain in the cache.
+
+Converted trailers are written to a temporary file and renamed to `video1` only after conversion and any enabled validation succeed. These completion safeguards apply even when validation is disabled.
 
 ### docker-compose.yml
 ```version: "3"

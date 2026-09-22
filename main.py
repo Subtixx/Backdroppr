@@ -1,12 +1,14 @@
 import os
+import json
+import re
 import shutil
 import subprocess
-from glob import glob
 from time import sleep
 import logging
 import requests
 import yaml
 import yt_dlp
+from yt_dlp.postprocessor import PostProcessor
 from pyarr import SonarrAPI, RadarrAPI
 
 
@@ -14,16 +16,21 @@ def load_config():
     with open('config/config.yaml', 'r') as f:
         global config
         config = yaml.load(f, Loader=yaml.Loader)
+        if not isinstance(config.get('validate_trailers', True), bool):
+            raise ValueError('validate_trailers must be true or false')
 
 
 def dl_progress(d):
     if d['status'] == 'finished':
-        logging.info("Trailer downloaded.")
+        logging.info("Stream downloaded; finishing trailer processing...")
 
 
 def check_duration(info, *, incomplete):
     duration = info.get('duration')
-    if duration not in range(int(config['length_range'].split(",")[0]), int(config['length_range'].split(",")[1])):
+    if duration is None:
+        return None
+    minimum, maximum = map(int, config['length_range'].split(','))
+    if not minimum <= duration < maximum:
         return 'Video too long/short'
 
 
@@ -64,24 +71,23 @@ def movie_finder():
                     tmdb_id = movie_item['tmdbId']
                     try:
                         link = trailer_pull(tmdb_id, "movie")
-                        trailer_download(link, movie_item)
-                    except:
-                        logging.warning("No trailer found on TMDB! Searching manually...")
-                        trailer_download(f"ytsearch5:{movie_item['title']} ({movie_item['year']}) Trailer", movie_item)
-                    fileout = glob(f'cache/{movie_item["sortTitle"]}.*')
-                    result = crop_check(fileout[0])
+                    except Exception as e:
+                        logging.warning(f"TMDB lookup failed: {e}")
+                        link = None
+                    fileout = trailer_download(link, movie_item)
+                    result = crop_check(fileout)
                     if result[1] is None:
                         logging.error("ERROR!")
-                        exit()
-                    post_process(fileout[0], result[0], movie_item['path'], result[1])
+                        continue
+                    post_process(fileout, result[0], movie_item['path'], result[1])
                 logging.info("Copying trailer to additional directories from the config, if not copied yet...")
                 for dir in config['output_dirs'].split(',')[1:]:
                     try:
-                        os.mkdir(f"{movie_item['path']}/{dir}")
-                    except:
+                        os.makedirs(f"{movie_item['path']}/{dir}", exist_ok=True)
+                    except OSError:
                         continue
-                    if not os.path.isfile(f"{movie_item['path']}/{dir}/video1.webm"):
-                        shutil.copy(
+                    if not os.path.isfile(f"{movie_item['path']}/{dir}/video1.{config['filetype']}"):
+                        copy_trailer(
                             f"{movie_item['path']}/{config['output_dirs'].split(',')[0]}/video1.{config['filetype']}",
                             f"{movie_item['path']}/{dir}/video1.{config['filetype']}")
                         logging.info("Copied trailer.")
@@ -104,7 +110,7 @@ def show_finder():
                     show_item['path'] = f"{config['tvpath']}/{show_item['path'][0:-1].split('/')[-1]}"
                 else:
                     show_item['path'] = f"{config['tvpath']}/{show_item['path'].split('/')[-1]}"
-            if show_item['episodeFileCount'] > 0:
+            if show_item['statistics']['episodeFileCount'] > 0:
                 tv_num = tv_num + 1
                 logging.info(
                     f"[{tv_num}] -- Title: {show_item['title']}: Path: {show_item['path']} -- IMDB-ID: "
@@ -116,33 +122,24 @@ def show_finder():
                         show_id = requests.get(
                             f"https://api.themoviedb.org/3/find/{show_item['imdbId']}?api_key={config['tmdb_api']}"
                             f"&external_source=imdb_id").json()['tv_results']
-                        if 'id' in show_id[0]:
-                            link = trailer_pull(show_id[0]['id'], "tv")
-                            if link == 1:
-                                logging.warning("No trailer found!\nSearching manually...")
-                                trailer_download(f"ytsearch5:{show_item['title']} ({show_item['year']}) Trailer",
-                                                 show_item)
-                            trailer_download(link, show_item)
-                        else:
-                            logging.warning("Not found on TMDB!\nSearching manually...")
-                            trailer_download(f"ytsearch5:{show_item['title']} ({show_item['year']}) Trailer", show_item)
+                        link = trailer_pull(show_id[0]['id'], "tv") if show_id else None
                     except Exception as e:
-                        logging.error(f"ERROR: {e}\nSearching manually...")
-                        trailer_download(f"ytsearch5:{show_item['title']} ({show_item['year']}) Trailer", show_item)
-                    fileout = glob(f'cache/{show_item["sortTitle"]}.*')
-                    result = crop_check(fileout[0])
+                        logging.warning(f"TMDB lookup failed: {e}")
+                        link = None
+                    fileout = trailer_download(link, show_item)
+                    result = crop_check(fileout)
                     if result[1] is None:
                         logging.error("ERROR!")
-                        exit()
-                    post_process(fileout[0], result[0], show_item['path'], result[1])
+                        continue
+                    post_process(fileout, result[0], show_item['path'], result[1])
                 logging.info("Copying trailer to additional directories from the config, if not copied yet...")
                 for dir in config['output_dirs'].split(',')[1:]:
                     try:
-                        os.mkdir(f"{show_item['path']}/{dir}")
-                    except:
+                        os.makedirs(f"{show_item['path']}/{dir}", exist_ok=True)
+                    except OSError:
                         continue
-                    if not os.path.isfile(f"{show_item['path']}/{dir}/video1.webm"):
-                        shutil.copy(
+                    if not os.path.isfile(f"{show_item['path']}/{dir}/video1.{config['filetype']}"):
+                        copy_trailer(
                             f"{show_item['path']}/{config['output_dirs'].split(',')[0]}/video1.{config['filetype']}",
                             f"{show_item['path']}/{dir}/video1.{config['filetype']}")
                         logging.info("Copied trailer.")
@@ -150,79 +147,155 @@ def show_finder():
             logging.error(e)
 
 
+def copy_trailer(source, destination):
+    temporary = destination + '.tmp'
+    try:
+        shutil.copy(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        if os.path.isfile(temporary):
+            os.remove(temporary)
+
+
+def validate_trailer(filename):
+    if not config.get('validate_trailers', True):
+        return
+    if os.path.getsize(filename) == 0:
+        raise ValueError(f'Empty trailer: {filename}')
+    result = subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_streams', '-of', 'json', filename],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    streams = json.loads(result.stdout).get('streams', [])
+    video = any(s.get('codec_type') == 'video' and
+                not s.get('disposition', {}).get('attached_pic') for s in streams)
+    audio = any(s.get('codec_type') == 'audio' for s in streams)
+    if not video or not audio:
+        raise ValueError(f'Trailer must contain video and audio: {filename}')
+
+
+class FinalFilePP(PostProcessor):
+    def __init__(self, downloader):
+        super().__init__(downloader)
+        self.filename = None
+
+    def run(self, info):
+        self.filename = info['filepath']
+        return [], info
+
+
+def trailer_candidates(link, item):
+    if link and link != 1:
+        yield link
+    logging.info('Searching for another trailer...')
+    with yt_dlp.YoutubeDL({'extract_flat': True, 'skip_download': True, 'socket_timeout': 30}) as ydl:
+        results = ydl.extract_info(
+            f"ytsearch5:{item['title']} ({item['year']}) Trailer", download=False,
+        )
+    for entry in (results or {}).get('entries', []):
+        if entry and entry.get('id') and entry['id'] != link:
+            yield f"https://www.youtube.com/watch?v={entry['id']}"
+
+
 def trailer_download(link, item):
     ytdl_opts = {
         'progress_hooks': [dl_progress],
-        'format': 'bestvideo+bestaudio',
-        'outtmpl': f'cache/{item["sortTitle"]}'
+        'format': 'bestvideo+bestaudio/best',
+        'outtmpl': 'cache/%(id)s.%(ext)s',
+        'continuedl': True,
+        'retries': 3,
+        'fragment_retries': 3,
+        'skip_unavailable_fragments': False,
+        'socket_timeout': 30,
+        'noplaylist': True,
     }
-    try:
-        ytdl_opts.update({'match_filter': check_duration}) if 'length_range' in config else None
-    except:
-        pass
-    try:
-        ytdl_opts.update({'postprocessors': [{'key': 'SponsorBlock'}, {'key': 'ModifyChapters', 'remove_sponsor_segments': ['sponsor', 'intro', 'outro', 'selfpromo', 'preview', 'filler', 'interaction']}]}) if config['skip_intros'] else None
-    except:
-        pass
-    fileout = glob(f'cache/{item["sortTitle"]}.*')
-    os.remove(fileout[0]) if len(fileout) > 1 else None
-    try:
-        ydl = yt_dlp.YoutubeDL(ytdl_opts)
-        ydl.download([link])
-    except Exception as e:
-        logging.warning("Something went wrong, Searching for something else...")
-        fileout = glob(f'cache/{item["sortTitle"]}.*')
-        os.remove(fileout[0]) if len(fileout) > 1 else None
-        ydl = yt_dlp.YoutubeDL(ytdl_opts)
-        ydl.download([f"ytsearch5:{item['title']} ({item['year']}) Trailer"])
+    if 'length_range' in config:
+        ytdl_opts['match_filter'] = check_duration
+    if config.get('skip_intros', False):
+        ytdl_opts['postprocessors'] = [
+            {'key': 'SponsorBlock'},
+            {'key': 'ModifyChapters', 'remove_sponsor_segments': [
+                'sponsor', 'intro', 'outro', 'selfpromo', 'preview', 'filler', 'interaction',
+            ]},
+        ]
+    for candidate in trailer_candidates(link, item):
+        for attempt in range(1, 3):
+            try:
+                with yt_dlp.YoutubeDL(ytdl_opts) as ydl:
+                    completed = FinalFilePP(ydl)
+                    ydl.add_post_processor(completed, when='after_move')
+                    ydl.extract_info(candidate, download=True)
+                filename = completed.filename
+                if not filename:
+                    logging.info(f'No completed download for {candidate}; trying another trailer.')
+                    break
+                if filename.endswith(('.part', '.ytdl', '.tmp')) or not os.path.isfile(filename):
+                    raise ValueError('Download did not produce a completed file')
+                try:
+                    validate_trailer(filename)
+                except (ValueError, subprocess.CalledProcessError):
+                    os.remove(filename)
+                    raise
+                return filename
+            except Exception as e:
+                logging.warning(f'Trailer attempt {attempt}/2 failed for {candidate}: {e}')
+    raise RuntimeError(f"No downloadable trailer found for {item['title']}")
 
 
 def crop_check(filename):
-    logging.info("Looking for black borders...")
-    cropvalue = subprocess.check_output(f"ffmpeg -i '{filename}' -t 30 -vf cropdetect -f null - 2>&1 | awk "
-                                    "'/crop/ {{ print $NF }}' | tail -1",
-                                        shell=True).decode('utf-8').strip()
-    logging.debug(cropvalue)
-    l = [j for i, j in {720: 20, 1280: 24, 1920: 28, 3840: 35}.items()
-         if i >= int(cropvalue.split('crop=')[1].split(':')[0])]
-    return cropvalue, l[0] if len(l) > 0 else None
+    logging.info('Looking for black borders...')
+    result = subprocess.run(
+        ['ffmpeg', '-nostdin', '-i', filename, '-t', '30', '-vf', 'cropdetect',
+         '-an', '-f', 'null', '-'],
+        capture_output=True, text=True, check=True,
+    )
+    crops = re.findall(r'crop=\d+:\d+:\d+:\d+', result.stderr)
+    if not crops:
+        return 'null', 28
+    cropvalue = crops[-1]
+    width = int(cropvalue.split('=')[1].split(':')[0])
+    bitrate = next((value for limit, value in {720: 20, 1280: 24, 1920: 28, 3840: 35}.items()
+                    if width <= limit), 35)
+    return cropvalue, bitrate
 
 
 def post_process(filename, cropvalue, item_path, bitrate):
+    filetype = config['filetype']
+    directory = os.path.join(item_path, config['output_dirs'].split(',')[0])
+    os.makedirs(directory, exist_ok=True)
+    destination = os.path.join(directory, f'video1.{filetype}')
+    temporary = os.path.join(directory, f'video1.tmp.{filetype}')
+    command = ['ffmpeg', '-nostdin', '-i', filename]
+    subtitle = os.path.splitext(filename)[0] + '.en.vtt'
+    if config.get('subs', False) and os.path.isfile(subtitle):
+        command += ['-i', subtitle, '-map', '0:v:0', '-map', '0:a:0?', '-map', '1:0',
+                    '-metadata:s:s:0', 'language=eng', '-c:s',
+                    'webvtt' if filetype == 'webm' else 'mov_text']
+    else:
+        command += ['-map', '0:v:0', '-map', '0:a:0?']
+    command += ['-threads', str(thread_count), '-vf', cropvalue]
+    if filetype == 'webm':
+        command += ['-c:v', 'libvpx-vp9', '-crf', str(bitrate), '-b:v', '4500k',
+                    '-af', 'volume=-5dB']
+    else:
+        command += ['-c:v', 'libx264', '-b:v', str(bitrate * 140),
+                    '-maxrate', str(bitrate * 140), '-bufsize', '2M', '-preset', 'slow',
+                    '-c:a', 'aac', '-af', 'volume=-7dB']
     try:
-        try:
-            os.mkdir(f'{item_path}/{config["output_dirs"].split(",")[0]}')
-        except:
-            logging.debug("Output directory found.")
-        sub_file = ""
-        if config['filetype'] == "webm":
-            if config['subs']:
-                if f"{filename}.en.vtt" in os.listdir("cache/"):
-                    logging.info("Subs found")
-                    sub_file = f"-i \"cache/{filename}.en.vtt\" -map 0:v -map 0:a -map 1 -metadata:s:s:0 language=eng"
-            subprocess.check_call(
-                f'ffmpeg -i "{filename}" {sub_file} -threads {thread_count} -vf {cropvalue} -c:v libvpx-vp9 -crf {bitrate} -b:v '
-                f'4500k -af "volume=-5dB" -y "{item_path}/{config["output_dirs"].split(",")[0]}/video1.webm"',
-                                        shell=True)
-        else:
-            if config['subs']:
-                if f"{filename}.en.vtt" in os.listdir("cache/"):
-                    logging.info("Subs found")
-                    sub_file = f"-i \"cache/{filename}.en.vtt\" -map 0:v -map 0:a -map 1 -metadata:s:s:0 language=eng " \
-                               f"-disposition:s:0 forced -c:s ssa "
-            subprocess.check_call(f'ffmpeg -i "{filename}" {sub_file} -threads {thread_count} -vf {cropvalue} -c:v libx264 -b:v {bitrate*140} '
-                                  f'-maxrate {bitrate*140} -bufsize 2M -preset slow -c:a aac -af "volume=-7dB" '
-                                  f'-y "{item_path}/{config["output_dirs"].split(",")[0]}/video1.mp4"',
-                                        shell=True)
-        os.remove(f"{filename}")
-    except Exception as e:
-        logging.error(f"ERROR: {e}")
+        subprocess.run(command + ['-y', temporary], check=True)
+        validate_trailer(temporary)
+        os.replace(temporary, destination)
+    finally:
+        if os.path.isfile(temporary):
+            os.remove(temporary)
+    os.remove(filename)
+
 
 logging.basicConfig(format='%(asctime)s %(message)s', encoding='utf-8', level=logging.INFO)
 try:
     os.mkdir("cache")
     logging.debug("Created cache directory.")
-except:
+except FileExistsError:
     logging.debug("Cache directory found.")
 while True:
     load_config()
@@ -237,14 +310,13 @@ while True:
         show_finder()
     else:
         logging.info("No Sonarr API key/host were found, skipping...")
-    for f in os.listdir("cache/"): os.remove(f"cache/{f}")
     if 'sleep_time' in config:
         if isinstance(config['sleep_time'], int):
             logging.info(
-                f"Operation complete. Clearing temporary files and sleeping for {config['sleep_time']} hour(s).")
+                f"Operation complete. Sleeping for {config['sleep_time']} hour(s).")
         else:
             logging.info(
-                f"Operation complete. Clearing temporary files and sleeping for {config['sleep_time'] * 60} minute(s).")
+                f"Operation complete. Sleeping for {config['sleep_time'] * 60} minute(s).")
         sleep(float(config['sleep_time']) * 3600)
     else:
         exit(logging.info("Operation complete. No sleep time was set, stopping."))
